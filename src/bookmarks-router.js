@@ -1,109 +1,150 @@
+const path = require('path')
 const express = require('express')
+const { isWebUri } = require('valid-url')
+const xss = require('xss')
 const bookmarksRouter = express.Router()
 const bodyParser = express.json()
-const uuid = require('uuid')
 const logger = require('./logger')
-
-const bookmarks = [
-    {
-        id: 1,
-        title: "Permanent Record",
-        url: "www.google2.com",
-        description: "Edward Snowden, the man who risked everything to expose the US government’s system of mass surveillance, reveals for the first time the story of his life, including how he helped to build that system and what motivated him to try to bring it down.",
-        rating: 5
-    },
-    {
-        id: 2,
-        title: "Room on the Broom",
-        url: "www.google1.com",
-        description: "The witch and her cat are happily flying through the sky on a broomstick when the wind picks up and blows away the witch's hat, then her bow, and then her wand!  Luckily, three helpful animals find the missing items, and all they want in return is a ride on the broom.  But is there room on the broom for so many friends?  And when disaster strikes, will they be able to save the witch from a hungry dragon?",
-        rating: 5
-    },
-    {
-        id: 3,
-        title: "Wrecking Ball",
-        url: "www.google3.com",
-        description: "In Wrecking Ball, Book 14 of the Diary of a Wimpy Kid series—from #1 international bestselling author Jeff Kinney—an unexpected inheritance gives Greg Heffley’s family a chance to make big changes to their house. But they soon find that home improvement isn’t all it’s cracked up to be.",
-        rating: 4
-    }
-]
+const BookmarksService = require('./bookmarks-service')
 
 bookmarksRouter
     .route('/bookmarks')
-    .get((req, res) => {
-        if (bookmarks.length === 0) {
-            logger.info('Bookmarks list is empty')
-        }
-        return res.json(bookmarks)
+    .get((req, res, next) => {
+        const knexInstance = req.app.get('db')
+        BookmarksService.getAllBookmarks(knexInstance)
+        .then(list => {
+            if (!list) {
+                logger.info('Bookmarks list is empty')
+            }
+            res.json(list.map(bm => ({
+                ...bm,
+                title: xss(bm.title),
+                description: xss(bm.description)
+            })))
+        })
+        .catch(next)
     })
-    .post(bodyParser, (req, res) => {
+    .post(bodyParser, (req, res, next) => {
+        const knexInstance = req.app.get('db')
         const {title, url, description="", rating} = req.body
-        if (!title) {
-            logger.error('Title is required')
-            return res.status(400).send('Invalid data')
-        }
-        if (!url) {
-            logger.error('URL is required')
-            return res.status(400).send('Invalid data')
-        }
-        if (!rating) {
-            logger.error('Rating is required')
-            return res.status(400).send('Invalid data')
-        }
-        if(url) {
-            let valid = true
-            bookmarks.forEach(bm => {
-                if (bm.url == url) {
-                    valid = false
-                }})
-            if (!valid) {
-                logger.error(`url ${url} is duplicate`)
-                return res.status(400).send('Duplicate URL')
+
+        // const requiredFields = ['title', 'url', 'rating']
+        // requiredFields.forEach(field => {
+        //     if (!req.body[field]) {
+        //         logger.error((`Missing ${field} in the request body`))
+        //         return res.status(400).send(
+        //             {error: {message: `${field} is required`}}
+        //         )}
+        // })
+
+        for (const field of ['title', 'url', 'rating']) {
+            if (!req.body[field]) {
+                logger.error(`${field} is required`)
+                return res.status(400).send({
+                    error: {message: `${field} is required`}
+                })
             }
         }
-        const id = uuid()
-        const ratingNumber = Number(rating)
-        const newBookmark = {
-            id,
-            title,
-            url,
-            description,
-            ratingNumber
+  
+            let unique = true
+            BookmarksService
+            .getAllBookmarks(knexInstance)
+            .then(bookmarks => 
+                bookmarks.forEach(bm => {
+                   if (bm.url == url) {
+                        valid = false 
+                    }
+                    if (!unique) {
+                        logger.error(`url ${url} is duplicate`)
+                        res.status(400).send('Duplicate URL') 
+                    }
+                })
+            )
+
+        if(!isWebUri(url)) {
+            logger.error(`Invalid url ${url}`)
+            return res.status(400).send({
+                error: {message: `url must be a valid url`}
+            })
         }
 
-        bookmarks.push(newBookmark)
-        logger.info(`Bookmark id ${id} created`)
-        res.status(201).location(`http://localhost:8000/${id}`).json(newBookmark)
-        
+        const newBookmark = {title, url, description, rating}
+
+        BookmarksService.insertBookmark(knexInstance, newBookmark)
+        .then(bm => {
+            res
+                .status(201)
+                .location(path.posix.join(req.originalUrl) + `/${bm.id}`)
+                .json({
+                    ...bm,
+                    title: xss(bm.title),
+                    description: xss(bm.description)
+                })
+        })
+        .catch(next)
+    })
+    .patch((req, res) => {
+        res
+            .status(400)
+            .json({error: {message: 'Bookmark ID required'}})
+            .end()
     })
 
 bookmarksRouter
     .route('/bookmarks/:id')
-    .get((req, res) => {
-        const {id} = req.params
-        const bookmark = bookmarks.find(bm => bm.id == id)
-        if (!bookmark) {
-            logger.error(`Bookmark with ID ${id} not found`)
-            res.status(404).send('Bookmark not found')
+    .all((req, res, next) => {
+        const knexInstance = req.app.get('db')
+        const id = req.params.id
+        if (!id) {
+            return res.status(400).json({error: {message: 'Bookmark ID required'}})
         }
-        return res.json(bookmark)
+        BookmarksService.getBookmarkById(knexInstance, id)
+            .then(bookmark => {
+                if (!bookmark) {
+                    return res.status(404).json({
+                        error: {message: `Bookmark with id ${id} does not exist`}
+                    })
+                }
+                res.bookmark = bookmark
+                next()
+            })
+            .catch(next)
     })
-    .delete((req, res) => {
+    .get((req, res, next) => {
+        res.json({
+            ...res.bookmark,
+            title: xss(res.bookmark.title),
+            description: xss(res.bookmark.description)
+        })
+    })
+    .delete((req, res, next) => {
         const {id} = req.params
-        const bookmark = bookmarks.find(bm => bm.id == id)
-        if (!bookmark) {
-            logger.error(`Bookmark with ID ${id} not found`)
-            return res.status(404).send('Bookmark not found')
+        const knexInstance = req.app.get('db')
+        BookmarksService.deleteBookmark(knexInstance, id)
+            .then(() => {
+                logger.info(`Bookmark with id ${id} deleted`)
+                res.status(204).end()
+        })
+            .catch(next)
+    })
+    .patch(bodyParser, (req, res, next) => {
+        const {title, url, description, rating} = req.body
+        const bmToUpdate = {title, url, description, rating}
+        const {id} = req.params
+        if (!id) {
+            res.status(400).json({error: {message: 'Bookmark id required'}})
         }
-        const bmIndex = bookmarks.findIndex(bm => bm.id == id)
-        if (bmIndex === -1) {
-            logger.error(`Bookmark with ID ${id} not found`)
-            return res.status(404).send('Not Found')
+        const numberOfValues = Object.values(bmToUpdate).filter(Boolean).length
+        if (numberOfValues === 0) {
+            return res.status(400).json({error: {message: `Request body must contain either 'Title', 'Url', 'Description', or 'Rating'`}})
         }
-        bookmarks.splice(bmIndex, 1)
-        console.log(bookmarks)
-        logger.info(`Bookmark with ID ${id} deleted`)
-        res.status(204).end()
+        const knexInstance = req.app.get('db')
+        BookmarksService.updateBookmark(knexInstance, id, bmToUpdate)
+            .then(rowsAffected => {
+                res.status(204).end()
+            })
+            .catch(next)
+            
     })
 
 module.exports = bookmarksRouter

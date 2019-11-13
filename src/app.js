@@ -1,3 +1,4 @@
+require('dotenv').config()
 const express = require('express')
 const morgan = require('morgan')
 const cors = require('cors')
@@ -26,7 +27,7 @@ app.use(function validateBearerToken(req, res, next) {
     next()
 })
 
-app.use(bookmarksRouter)
+app.use('/api/', bookmarksRouter)
 
 app.use(function errorHandler(error, req, res, next) {
     let response
