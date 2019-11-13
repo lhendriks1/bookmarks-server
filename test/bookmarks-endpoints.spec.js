@@ -76,15 +76,6 @@ describe('BookmarksService methods', () => {
                     expect(actual).to.be.undefined
                 )
         })
-
-        // it.skip('updateBookmarkById() responds with undefined', () => {
-        //     const idToUpdate = 12345
-
-        //     return BookmarksService.updateBookmark(db, idToUpdate)
-        //         .then(actual => 
-        //             expect(actual).to.be.undefined
-        //         )
-        // })
     })             
 })
 
